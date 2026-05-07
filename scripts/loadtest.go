@@ -57,7 +57,7 @@ func main() {
 	}
 	elapsed := time.Since(start)
 	ops := float64(*n*2) / elapsed.Seconds()
-	fmt.Printf("leader=%s completed %d put/get pairs in %s (%.1f ops/sec)\n", target, *n, elapsed.Round(time.Millisecond), ops)
+	fmt.Printf("leader=%s writes=%d reads=%d elapsed=%s ops_sec=%.1f\n", target, *n, *n, elapsed.Round(time.Millisecond), ops)
 }
 
 func discoverLeader(addr string, peers map[string]string) (string, error) {

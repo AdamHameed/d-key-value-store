@@ -24,6 +24,7 @@ type Peer struct {
 type Config struct {
 	NodeID       string
 	RaftAddr     string
+	GRPCAddr     string
 	DataDir      string
 	Peers        []Peer
 	ApplyTimeout time.Duration
@@ -32,6 +33,9 @@ type Config struct {
 type Store struct {
 	raft         *raft.Raft
 	fsm          *fsm
+	nodeID       string
+	raftAddr     string
+	grpcAddr     string
 	peersByID    map[string]Peer
 	applyTimeout time.Duration
 }
@@ -52,6 +56,7 @@ func Open(cfg Config, kv *storage.Store) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "snapshots"), 0755); err != nil {
 		return nil, err
 	}
+	logEvent("recovery_start", "node", cfg.NodeID, "data_dir", cfg.DataDir)
 
 	raftCfg := raft.DefaultConfig()
 	raftCfg.LocalID = raft.ServerID(cfg.NodeID)
@@ -92,6 +97,7 @@ func Open(cfg Config, kv *storage.Store) (*Store, error) {
 		return nil, err
 	}
 	if !hasState {
+		logEvent("bootstrap_cluster", "node", cfg.NodeID, "peers", len(cfg.Peers))
 		var servers []raft.Server
 		for _, peer := range cfg.Peers {
 			servers = append(servers, raft.Server{
@@ -103,13 +109,15 @@ func Open(cfg Config, kv *storage.Store) (*Store, error) {
 		if err := future.Error(); err != nil {
 			return nil, err
 		}
+	} else {
+		logEvent("recovery_existing_state", "node", cfg.NodeID)
 	}
 
 	peersByID := make(map[string]Peer, len(cfg.Peers))
 	for _, peer := range cfg.Peers {
 		peersByID[peer.ID] = peer
 	}
-	return &Store{raft: r, fsm: f, peersByID: peersByID, applyTimeout: cfg.ApplyTimeout}, nil
+	return &Store{raft: r, fsm: f, nodeID: cfg.NodeID, raftAddr: cfg.RaftAddr, grpcAddr: cfg.GRPCAddr, peersByID: peersByID, applyTimeout: cfg.ApplyTimeout}, nil
 }
 
 func (s *Store) Put(key string, value []byte) error {
@@ -140,9 +148,12 @@ func (s *Store) LeaderGRPCAddr() string {
 
 func (s *Store) Status() Status {
 	return Status{
-		NodeID:       string(s.raft.String()),
+		NodeID:       s.nodeID,
+		GRPCAddr:     s.grpcAddr,
+		RaftAddr:     s.raftAddr,
 		State:        s.raft.State().String(),
 		Leader:       s.LeaderGRPCAddr(),
+		CommitIndex:  s.raft.CommitIndex(),
 		LastIndex:    s.raft.LastIndex(),
 		AppliedIndex: s.raft.AppliedIndex(),
 		Peers:        s.Peers(),
@@ -163,26 +174,34 @@ func (s *Store) Shutdown() error {
 
 func (s *Store) apply(cmd command) error {
 	if !s.IsLeader() {
+		logEvent("redirect_write", "node", s.nodeID, "op", cmd.Op, "key", cmd.Key, "leader", s.LeaderGRPCAddr())
 		return ErrNotLeader{Leader: s.LeaderGRPCAddr()}
 	}
+	logEvent("raft_apply_start", "node", s.nodeID, "op", cmd.Op, "key", cmd.Key)
 	payload, err := json.Marshal(cmd)
 	if err != nil {
 		return err
 	}
 	future := s.raft.Apply(payload, s.applyTimeout)
 	if err := future.Error(); err != nil {
+		logEvent("raft_apply_error", "node", s.nodeID, "op", cmd.Op, "key", cmd.Key, "error", err)
 		return err
 	}
 	if err, ok := future.Response().(error); ok {
+		logEvent("fsm_apply_error", "node", s.nodeID, "op", cmd.Op, "key", cmd.Key, "error", err)
 		return err
 	}
+	logEvent("raft_commit", "node", s.nodeID, "op", cmd.Op, "key", cmd.Key, "commit_index", s.raft.CommitIndex(), "applied_index", s.raft.AppliedIndex())
 	return nil
 }
 
 type Status struct {
 	NodeID       string
+	GRPCAddr     string
+	RaftAddr     string
 	State        string
 	Leader       string
+	CommitIndex  uint64
 	LastIndex    uint64
 	AppliedIndex uint64
 	Peers        []Peer
@@ -216,8 +235,10 @@ func (f *fsm) Apply(log *raft.Log) interface{} {
 	}
 	switch cmd.Op {
 	case "put":
+		logEvent("fsm_apply", "op", cmd.Op, "key", cmd.Key, "bytes", len(cmd.Value), "index", log.Index)
 		return f.store.Put(cmd.Key, cmd.Value)
 	case "delete":
+		logEvent("fsm_apply", "op", cmd.Op, "key", cmd.Key, "index", log.Index)
 		return f.store.Delete(cmd.Key)
 	default:
 		return fmt.Errorf("unknown command %q", cmd.Op)
@@ -233,6 +254,7 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	logEvent("snapshot_create", "keys", len(items), "bytes", len(data))
 	return &snapshot{data: data}, nil
 }
 
@@ -246,6 +268,7 @@ func (f *fsm) Restore(r io.ReadCloser) error {
 	if err != nil {
 		return err
 	}
+	logEvent("snapshot_restore", "keys", len(items), "bytes", len(data))
 	return f.store.Restore(items)
 }
 
@@ -258,7 +281,33 @@ func (s *snapshot) Persist(sink raft.SnapshotSink) error {
 		_ = sink.Cancel()
 		return err
 	}
+	logEvent("snapshot_persist", "bytes", len(s.data))
 	return sink.Close()
 }
 
 func (s *snapshot) Release() {}
+
+func logEvent(event string, args ...any) {
+	fields := []any{"event", event}
+	fields = append(fields, args...)
+	fmt.Println(formatLog(fields...))
+}
+
+func formatLog(args ...any) string {
+	out := "level=info"
+	for i := 0; i+1 < len(args); i += 2 {
+		out += fmt.Sprintf(" %v=%s", args[i], logValue(args[i+1]))
+	}
+	return out
+}
+
+func logValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return fmt.Sprintf("%q", v)
+	case error:
+		return fmt.Sprintf("%q", v.Error())
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}

@@ -39,6 +39,7 @@ func main() {
 	rs, err := raftstore.Open(raftstore.Config{
 		NodeID:   *nodeID,
 		RaftAddr: *raftAddr,
+		GRPCAddr: *grpcAddr,
 		DataDir:  filepath.Join(*dataDir, *nodeID),
 		Peers:    peers,
 	}, kv)

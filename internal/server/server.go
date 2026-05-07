@@ -58,8 +58,11 @@ func (s *KVServer) Status(ctx context.Context, req *kvpb.StatusRequest) (*kvpb.S
 	status := s.store.Status()
 	resp := &kvpb.StatusResponse{
 		NodeId:       s.nodeID,
+		GrpcAddr:     status.GRPCAddr,
+		RaftAddr:     status.RaftAddr,
 		State:        status.State,
 		Leader:       status.Leader,
+		CommitIndex:  status.CommitIndex,
 		LastIndex:    status.LastIndex,
 		AppliedIndex: status.AppliedIndex,
 	}

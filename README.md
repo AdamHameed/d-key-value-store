@@ -1,133 +1,195 @@
-# d-key-value-store
+# Distributed Key-Value Store
 
-A small, runnable distributed key-value store MVP in Go. It starts a 3-node Raft cluster locally, exposes a gRPC API, replicates writes through a leader, persists Raft state, snapshots KV state, and includes a CLI plus a small load test.
+A demo-friendly 3-node distributed key-value database in Go. It uses gRPC/protobuf for the API, HashiCorp Raft for consensus, BadgerDB for embedded storage, Bolt-backed Raft WAL files, Raft snapshots, Docker Compose, a polished `kvctl` CLI, and scripts that prove failover and recovery.
 
-This is a learning/demo database, not a production database.
+This is intentionally small enough to read, but complete enough to demo.
+
+## Quick Demo
+
+```bash
+make demo
+```
+
+The demo script:
+
+- starts the 3-node Docker cluster
+- waits for leader election
+- writes and reads sample keys
+- kills the current leader
+- waits for failover
+- writes after failover
+- restarts the killed node
+- verifies previously committed data is still available
 
 ## Architecture
 
-- `cmd/node`: starts one database node.
-- `cmd/client`: CLI for `put`, `get`, `delete`, and `status`.
-- `internal/server`: gRPC API implementation.
-- `internal/raftstore`: HashiCorp Raft setup, FSM, log application, snapshots.
-- `internal/storage`: BadgerDB-backed embedded key-value engine.
-- `proto/kv.proto`: protobuf service definition.
-- `docker-compose.yml`: 3-node local cluster.
+```mermaid
+flowchart LR
+  CLI[kvctl CLI] -->|gRPC Put/Get/Delete/Status| N1[node1]
+  CLI -->|gRPC| N2[node2]
+  CLI -->|gRPC| N3[node3]
 
-RocksDB is not used because it usually needs native library setup in the container. This MVP uses BadgerDB instead, which is pure Go and keeps `docker compose up --build` straightforward.
+  subgraph Raft Cluster
+    N1 <-->|Raft log replication| N2
+    N2 <-->|Raft log replication| N3
+    N3 <-->|Raft log replication| N1
+  end
+
+  N1 --> B1[(BadgerDB state)]
+  N2 --> B2[(BadgerDB state)]
+  N3 --> B3[(BadgerDB state)]
+
+  N1 --> W1[Raft WAL + snapshots]
+  N2 --> W2[Raft WAL + snapshots]
+  N3 --> W3[Raft WAL + snapshots]
+```
+
+## Components
+
+- `cmd/node`: starts one database node.
+- `cmd/client`: builds the `kvctl` CLI.
+- `internal/server`: gRPC API handlers.
+- `internal/raftstore`: Raft setup, FSM commands, commits, redirects, snapshots.
+- `internal/storage`: BadgerDB Put/Get/Delete, snapshot and restore helpers.
+- `proto/kv.proto`: gRPC service contract.
+- `scripts/demo.sh`: end-to-end failover and recovery demo.
+
+RocksDB is not used because it adds native library setup to the Docker path. This project uses BadgerDB, a pure-Go embedded KV engine, so `docker compose up --build` stays simple and reproducible.
+
+## CLI
+
+Build the binaries:
+
+```bash
+make build
+```
+
+Run against the Docker cluster from the host:
+
+```bash
+bin/kvctl put foo bar
+bin/kvctl get foo
+bin/kvctl delete foo
+bin/kvctl status
+bin/kvctl leader
+bin/kvctl load-test --writes 1000 --reads 1000
+```
+
+Without building first:
+
+```bash
+go run ./cmd/client -- put foo bar
+go run ./cmd/client -- get foo
+go run ./cmd/client -- status
+go run ./cmd/client -- leader
+go run ./cmd/client -- load-test --writes 1000 --reads 1000
+```
+
+Inside Docker:
+
+```bash
+docker compose exec node1 /kvctl --addr node1:50051 --peers node1=node1:50051,node2=node2:50051,node3=node3:50051 status
+```
+
+## Status Output
+
+Example:
+
+```text
+NODE    ADDRESS          STATE      LEADER           COMMIT   APPLIED
+node1   localhost:5001   leader     localhost:5001   42       42
+node2   localhost:5002   follower   localhost:5001   42       42
+node3   localhost:5003   follower   localhost:5001   42       42
+```
+
+The table shows node ID, client address, Raft state, current leader, commit index, and last applied FSM index.
 
 ## How Raft Is Used
 
-HashiCorp Raft provides leader election, log replication, quorum commits, and leader failover. Client writes become Raft log commands:
+All writes go through the Raft leader. A `put` or `delete` request becomes a JSON-encoded Raft log command. Once a quorum commits the entry, the FSM applies it to BadgerDB.
 
-- `put key value`
-- `delete key`
+Followers do not accept writes. They return the leader address, and `kvctl` follows the redirect automatically.
 
-Only the leader accepts writes. If a follower receives a write, it returns the current leader gRPC address. The CLI follows that redirect when it can map container names to host ports.
+Reads are leader-only to keep the consistency model easy to explain.
 
-Reads are intentionally simple: `Get` is served by the leader only.
+## WAL, Snapshots, Recovery
 
-## WAL And Snapshots
+Each node persists Raft state in its Docker volume:
 
-Raft logs and stable metadata are persisted under each node volume using Bolt-backed HashiCorp Raft stores:
-
-- `/data/<node>/raft/logs.bolt`
-- `/data/<node>/raft/stable.bolt`
-
-These files are the persistent Raft WAL/log storage used for replay after restart.
-
-Snapshots are written by Raft's file snapshot store under:
-
-- `/data/<node>/snapshots`
-
-The snapshot contains a serialized copy of the Badger key-value state. On restart, Raft restores the latest snapshot and replays later committed log entries.
-
-BadgerDB stores the materialized key-value state under:
-
-- `/data/<node>/badger`
-
-## Run The Cluster
-
-```bash
-docker compose up --build
+```text
+/data/<node>/raft/logs.bolt
+/data/<node>/raft/stable.bolt
+/data/<node>/snapshots
+/data/<node>/badger
 ```
 
-Wait until the logs show an elected leader. In another terminal:
+The Bolt files are the persistent Raft WAL/stable stores. Snapshots contain a serialized copy of the materialized KV state. On restart, Raft restores the latest snapshot and replays committed log entries after it.
 
-```bash
-go run ./cmd/client --addr localhost:5001 status
-go run ./cmd/client --addr localhost:5002 status
-go run ./cmd/client --addr localhost:5003 status
+Structured logs include events like:
+
+```text
+level=info event="recovery_start" node="node1" data_dir="/data/node1"
+level=info event="raft_apply_start" node="node1" op="put" key="foo"
+level=info event="fsm_apply" op="put" key="foo" bytes="3" index="12"
+level=info event="raft_commit" node="node1" op="put" key="foo" commit_index="12" applied_index="12"
+level=info event="snapshot_create" keys="128" bytes="4096"
+level=info event="snapshot_restore" keys="128" bytes="4096"
 ```
 
-## Put, Get, Delete
-
-The client can start against any node. If it reaches a follower, it follows the reported leader using the default host-port map.
+## Make Commands
 
 ```bash
-go run ./cmd/client --addr localhost:5001 put foo bar
-go run ./cmd/client --addr localhost:5002 get foo
-go run ./cmd/client --addr localhost:5003 delete foo
-go run ./cmd/client --addr localhost:5001 get foo
+make proto
+make build
+make up
+make down
+make demo
+make test
+make load-test
 ```
 
-You can also run the client from inside the compose network:
+## Manual Failover Demo
+
+Start the cluster:
 
 ```bash
-docker compose exec node1 /kv-client --addr node1:50051 --peers node1=node1:50051,node2=node2:50051,node3=node3:50051 put foo bar
-docker compose exec node2 /kv-client --addr node2:50051 --peers node1=node1:50051,node2=node2:50051,node3=node3:50051 get foo
+make up
 ```
 
-## Kill The Leader And Observe Failover
-
-Find the leader:
+In another terminal:
 
 ```bash
-go run ./cmd/client --addr localhost:5001 status
-go run ./cmd/client --addr localhost:5002 status
-go run ./cmd/client --addr localhost:5003 status
+go run ./cmd/client -- status
+go run ./cmd/client -- put before failover
+go run ./cmd/client -- get before
+go run ./cmd/client -- leader
 ```
 
-If the leader is `node1`, kill it:
+Stop whichever service maps to the leader address:
 
 ```bash
 docker compose stop node1
 ```
 
-Wait a few seconds, then check the surviving nodes:
+Wait a few seconds:
 
 ```bash
-go run ./cmd/client --addr localhost:5002 status
-go run ./cmd/client --addr localhost:5003 status
+go run ./cmd/client -- status
+go run ./cmd/client -- put after-failover still-works
+go run ./cmd/client -- get after-failover
 ```
 
-Write through a surviving node:
-
-```bash
-go run ./cmd/client --addr localhost:5002 put after-failover still-works
-go run ./cmd/client --addr localhost:5003 get after-failover
-```
-
-If a different node is leader, stop that service instead, then use either surviving node's host port.
-
-## Restart And Verify Recovery
-
-Start the stopped node again:
+Restart the killed node:
 
 ```bash
 docker compose start node1
+sleep 8
+go run ./cmd/client -- status
+go run ./cmd/client -- get before
+go run ./cmd/client -- get after-failover
 ```
 
-Give it a few seconds to rejoin and catch up:
-
-```bash
-go run ./cmd/client --addr localhost:5001 status
-go run ./cmd/client --addr localhost:5001 get after-failover
-```
-
-Because compose uses named volumes, the node keeps its Raft logs, snapshots, and Badger state across container restarts.
-
-To reset all data:
+Reset all local data:
 
 ```bash
 docker compose down -v
@@ -135,46 +197,45 @@ docker compose down -v
 
 ## Load Test
 
-Run many put/get pairs and print approximate throughput:
-
 ```bash
-go run ./scripts/loadtest.go --addr localhost:5001 --n 1000
+make load-test
 ```
 
-Or via Make:
+Example output:
 
-```bash
-make load
+```text
+leader=localhost:5001 writes=1000 reads=1000 concurrency=16 elapsed=1.6s ops_sec=1250.0
 ```
 
-## Development
+Actual throughput depends on Docker, CPU, disk, and whether the leader is running locally. The target is to demonstrate roughly 1,000+ local operations/sec when the machine can support it.
+
+## Tests
 
 ```bash
-go test ./...
-go build ./cmd/node ./cmd/client
+make test
 ```
 
-Regenerate protobuf bindings:
+Coverage includes:
 
-```bash
-go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
-PATH="$(go env GOPATH)/bin:$PATH" make proto
-```
+- Badger storage Put/Get/Delete
+- persistence across Badger WAL restart
+- snapshot restore replacing stale state
+- follower write redirect using a real 3-node in-process Raft cluster
 
 ## Known Limitations
 
 - No TLS or authentication.
-- No dynamic cluster membership.
-- Reads are leader-only; there are no linearizable follower reads.
-- Follower writes return leader information instead of proxying.
-- Conflict handling is last-write-wins by Raft log order.
-- Snapshot format is a simple JSON map, good for demos but not large datasets.
-- The load test is intentionally simple and single-process.
+- No dynamic membership changes.
+- Reads are leader-only.
+- Follower writes redirect instead of proxying.
+- Snapshot format is a simple JSON map.
+- No compaction tuning, batching API, or production-grade observability backend.
 
-## Resume Bullets
+## Resume Highlights
 
-- Built a 3-node replicated key-value database in Go using gRPC, protobuf, HashiCorp Raft, BadgerDB, Docker, and docker-compose.
-- Implemented leader-only writes, follower leader redirects, Raft-backed log replication, failover handling, and quorum-based commit through HashiCorp Raft.
-- Added persistent Raft log/stable stores, Badger-backed materialized state, file snapshots, and restart recovery from snapshots plus committed logs.
-- Created a CLI and load test script to demonstrate Put/Get/Delete, leader status, failover, and approximate throughput.
+Distributed Key-Value Store | Go, Raft, gRPC, WAL, BadgerDB, Docker
+
+- Built a replicated key-value database in Go with leader election, log replication, snapshots, and recovery.
+- Implemented Raft consensus across 3 Dockerized nodes, preserving consistent writes through leader failover.
+- Added gRPC request routing and quorum commits, with local load tests targeting 1,000+ operations/sec.
+- Persisted replicated logs with WAL and snapshots, restoring node state after process restarts.

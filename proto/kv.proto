@@ -52,6 +52,9 @@ message StatusResponse {
   uint64 last_index = 4;
   uint64 applied_index = 5;
   repeated Peer peers = 6;
+  string grpc_addr = 7;
+  string raft_addr = 8;
+  uint64 commit_index = 9;
 }
 
 message Peer {

@@ -393,6 +393,9 @@ type StatusResponse struct {
 	LastIndex     uint64                 `protobuf:"varint,4,opt,name=last_index,json=lastIndex,proto3" json:"last_index,omitempty"`
 	AppliedIndex  uint64                 `protobuf:"varint,5,opt,name=applied_index,json=appliedIndex,proto3" json:"applied_index,omitempty"`
 	Peers         []*Peer                `protobuf:"bytes,6,rep,name=peers,proto3" json:"peers,omitempty"`
+	GrpcAddr      string                 `protobuf:"bytes,7,opt,name=grpc_addr,json=grpcAddr,proto3" json:"grpc_addr,omitempty"`
+	RaftAddr      string                 `protobuf:"bytes,8,opt,name=raft_addr,json=raftAddr,proto3" json:"raft_addr,omitempty"`
+	CommitIndex   uint64                 `protobuf:"varint,9,opt,name=commit_index,json=commitIndex,proto3" json:"commit_index,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -467,6 +470,27 @@ func (x *StatusResponse) GetPeers() []*Peer {
 		return x.Peers
 	}
 	return nil
+}
+
+func (x *StatusResponse) GetGrpcAddr() string {
+	if x != nil {
+		return x.GrpcAddr
+	}
+	return ""
+}
+
+func (x *StatusResponse) GetRaftAddr() string {
+	if x != nil {
+		return x.RaftAddr
+	}
+	return ""
+}
+
+func (x *StatusResponse) GetCommitIndex() uint64 {
+	if x != nil {
+		return x.CommitIndex
+	}
+	return 0
 }
 
 type Peer struct {
@@ -556,7 +580,7 @@ const file_kv_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x16\n" +
 	"\x06leader\x18\x02 \x01(\tR\x06leader\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\"\x0f\n" +
-	"\rStatusRequest\"\xbb\x01\n" +
+	"\rStatusRequest\"\x98\x02\n" +
 	"\x0eStatusResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x16\n" +
@@ -564,7 +588,10 @@ const file_kv_proto_rawDesc = "" +
 	"\n" +
 	"last_index\x18\x04 \x01(\x04R\tlastIndex\x12#\n" +
 	"\rapplied_index\x18\x05 \x01(\x04R\fappliedIndex\x12\x1e\n" +
-	"\x05peers\x18\x06 \x03(\v2\b.kv.PeerR\x05peers\"P\n" +
+	"\x05peers\x18\x06 \x03(\v2\b.kv.PeerR\x05peers\x12\x1b\n" +
+	"\tgrpc_addr\x18\a \x01(\tR\bgrpcAddr\x12\x1b\n" +
+	"\traft_addr\x18\b \x01(\tR\braftAddr\x12!\n" +
+	"\fcommit_index\x18\t \x01(\x04R\vcommitIndex\"P\n" +
 	"\x04Peer\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\traft_addr\x18\x02 \x01(\tR\braftAddr\x12\x1b\n" +

@@ -1,20 +1,31 @@
-.PHONY: proto build test docker-up docker-down load
+.PHONY: proto build up down demo test load-test docker-up docker-down load
 
 proto:
 	PATH="$$(go env GOPATH)/bin:$$PATH" go run github.com/bufbuild/buf/cmd/buf@v1.50.0 generate
 
 build:
-	go build ./cmd/node ./cmd/client
+	go build -o bin/kv-node ./cmd/node
+	go build -o bin/kvctl ./cmd/client
 
 test:
 	go test ./...
 
-docker-up:
+up:
 	docker compose up --build
 
-docker-down:
+down:
 	docker compose down
 
+demo:
+	bash ./scripts/demo.sh
+
+load-test:
+	go run ./cmd/client -- load-test --writes 1000 --reads 1000
+
+docker-up: up
+
+docker-down: down
+
 load:
-	go run ./cmd/client --addr localhost:5001 status
-	go run ./scripts/loadtest.go --addr localhost:5001 --n 1000
+	go run ./cmd/client -- status
+	go run ./cmd/client -- load-test --writes 1000 --reads 1000
