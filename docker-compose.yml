@@ -1,0 +1,47 @@
+services:
+  node1:
+    build: .
+    container_name: dkv-node1
+    environment:
+      NODE_ID: node1
+      GRPC_ADDR: :50051
+      RAFT_ADDR: node1:7000
+      DATA_DIR: /data
+      CLUSTER: node1=node1:7000,node1:50051;node2=node2:7000,node2:50051;node3=node3:7000,node3:50051
+    ports:
+      - "5001:50051"
+    volumes:
+      - node1-data:/data
+
+  node2:
+    build: .
+    container_name: dkv-node2
+    environment:
+      NODE_ID: node2
+      GRPC_ADDR: :50051
+      RAFT_ADDR: node2:7000
+      DATA_DIR: /data
+      CLUSTER: node1=node1:7000,node1:50051;node2=node2:7000,node2:50051;node3=node3:7000,node3:50051
+    ports:
+      - "5002:50051"
+    volumes:
+      - node2-data:/data
+
+  node3:
+    build: .
+    container_name: dkv-node3
+    environment:
+      NODE_ID: node3
+      GRPC_ADDR: :50051
+      RAFT_ADDR: node3:7000
+      DATA_DIR: /data
+      CLUSTER: node1=node1:7000,node1:50051;node2=node2:7000,node2:50051;node3=node3:7000,node3:50051
+    ports:
+      - "5003:50051"
+    volumes:
+      - node3-data:/data
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
